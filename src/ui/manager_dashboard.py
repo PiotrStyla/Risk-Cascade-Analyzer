@@ -13,12 +13,113 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
+import logging
 from typing import Dict, List
 import networkx as nx
 
 from ..core.inference_engine import CascadeInferenceEngine
 from ..core.simulation_engine import MonteCarloSimulator
 from ..scenarios.scenario_base import SCENARIO_LIBRARY
+from .. import scenarios
+
+logging.getLogger("pgmpy").setLevel(logging.ERROR)
+
+
+def _format_node_label(builder, node_id: str) -> str:
+    node_def = builder.nodes.get(node_id)
+    if node_def is None:
+        return node_id
+    return f"{node_def.name} ({node_id})"
+
+
+def _format_node_description(builder, node_id: str) -> str:
+    node_def = builder.nodes.get(node_id)
+    if node_def is None:
+        return ""
+    return (node_def.description or "").strip()
+
+
+def _get_ui_scale() -> float:
+    value = st.session_state.get("ui_scale")
+    try:
+        return float(value) if value is not None else 1.15
+    except (TypeError, ValueError):
+        return 1.15
+
+
+def _inject_readability_css(ui_scale: float) -> None:
+    base = int(round(14 * ui_scale))
+    small = int(round(12 * ui_scale))
+    h1 = int(round(34 * ui_scale))
+    h2 = int(round(26 * ui_scale))
+    h3 = int(round(20 * ui_scale))
+    label = int(round(14 * ui_scale))
+    sidebar_width = int(round(340 * ui_scale))
+    st.markdown(
+        f"""
+<style>
+html, body, [class*='css'] {{
+  font-size: {base}px;
+}}
+h1 {{
+  font-size: {h1}px;
+  line-height: 1.2;
+}}
+h2 {{
+  font-size: {h2}px;
+  line-height: 1.25;
+}}
+h3 {{
+  font-size: {h3}px;
+  line-height: 1.25;
+}}
+div[data-testid='stSidebar'] {{
+  min-width: {sidebar_width}px;
+  width: {sidebar_width}px;
+}}
+div[data-testid='stSidebar'] * {{
+  font-size: {label}px;
+}}
+label, p, li, span {{
+  font-size: {label}px;
+}}
+div[data-testid='stMarkdownContainer'] p {{
+  font-size: {label}px;
+  line-height: 1.4;
+}}
+pre, code {{
+  font-size: {small}px;
+  line-height: 1.35;
+}}
+div[data-testid='stDataFrame'] * {{
+  font-size: {small}px;
+}}
+button {{
+  font-size: {label}px;
+  padding-top: {int(round(0.35 * ui_scale * 1.0))}rem;
+  padding-bottom: {int(round(0.35 * ui_scale * 1.0))}rem;
+}}
+div[data-baseweb='tab'] button {{
+  font-size: {label}px;
+}}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def _apply_plotly_readability(fig: go.Figure, ui_scale: float, height: int | None = None) -> go.Figure:
+    font_size = int(round(12 * ui_scale))
+    title_size = int(round(18 * ui_scale))
+    fig.update_layout(
+        font=dict(size=font_size),
+        title_font=dict(size=title_size),
+        legend=dict(font=dict(size=font_size)),
+        margin=dict(b=10, l=10, r=10, t=40),
+    )
+    if height is not None:
+        fig.update_layout(height=height)
+    return fig
 
 
 def render_dashboard():
@@ -29,7 +130,20 @@ def render_dashboard():
         page_icon="🔗",
         layout="wide"
     )
-    
+
+    with st.sidebar:
+        ui_scale = st.slider(
+            "UI Scale",
+            min_value=0.90,
+            max_value=1.60,
+            value=float(st.session_state.get("ui_scale", 1.15)),
+            step=0.05,
+            help="Increase this if text is too small.",
+        )
+        st.session_state["ui_scale"] = ui_scale
+
+    _inject_readability_css(_get_ui_scale())
+
     st.title("🔗 Retro Cascade: Universal Risk Cascade Analyzer")
     st.markdown("""
     **Bayesian framework for understanding how managerial decisions under stress 
@@ -98,7 +212,9 @@ def render_network_tab(scenario, builder):
     
     with col1:
         st.subheader("Cascade Network Graph")
-        fig = visualize_network(builder)
+        ui_scale = _get_ui_scale()
+        fig = visualize_network(builder, ui_scale)
+        fig = _apply_plotly_readability(fig, ui_scale, height=int(round(650 * ui_scale)))
         st.plotly_chart(fig, width='stretch')
     
     with col2:
@@ -169,7 +285,7 @@ def render_simulation_tab(scenario, builder):
     with col2:
         if run_button:
             with st.spinner("Running simulations..."):
-                simulator = MonteCarloSimulator(builder)
+                simulator = MonteCarloSimulator(builder, show_progress=False)
                 result = simulator.run_simulation(
                     num_samples=num_samples,
                     target_node=target_node,
@@ -220,6 +336,7 @@ def render_simulation_tab(scenario, builder):
                 orientation='h',
                 title="Which factors most influence the outcome?"
             )
+            fig = _apply_plotly_readability(fig, _get_ui_scale())
             st.plotly_chart(fig, width='stretch')
             
             # Critical paths
@@ -286,7 +403,7 @@ def render_sensitivity_tab(scenario, builder):
     with col2:
         if analyze_button and vary_nodes:
             with st.spinner("Analyzing sensitivity..."):
-                simulator = MonteCarloSimulator(builder)
+                simulator = MonteCarloSimulator(builder, show_progress=False)
                 sensitivity = simulator.sensitivity_monte_carlo(
                     num_samples=num_samples,
                     target_node=target_node,
@@ -302,6 +419,7 @@ def render_sensitivity_tab(scenario, builder):
             for node, state_impacts in sensitivity.items():
                 for state, impact in state_impacts.items():
                     heatmap_data.append({
+                        "NodeId": node,
                         "Factor": node.replace("org_", "").replace("_", " ").title(),
                         "State": state,
                         "Impact": impact * 100  # Convert to percentage
@@ -321,6 +439,7 @@ def render_sensitivity_tab(scenario, builder):
                     color_continuous_scale="RdYlGn_r",
                     aspect="auto"
                 )
+                fig = _apply_plotly_readability(fig, _get_ui_scale())
                 st.plotly_chart(fig, width='stretch')
             
             # Recommendations
@@ -336,10 +455,14 @@ def render_sensitivity_tab(scenario, builder):
                 if not positive_impacts.empty:
                     st.success("**Most Effective Risk Reductions:**")
                     for _, row in positive_impacts.head(3).iterrows():
+                        node_id = row.get("NodeId")
+                        description = _format_node_description(builder, str(node_id)) if node_id else ""
                         st.write(
                             f"- Change **{row['Factor']}** to **{row['State']}**: "
                             f"reduces risk by **{abs(row['Impact']):.1f}%**"
                         )
+                        if description:
+                            st.markdown(f"_Wyjaśnienie: {description}_")
 
 
 def render_intervention_tab(scenario, builder):
@@ -399,7 +522,7 @@ def render_intervention_tab(scenario, builder):
     with col2:
         if compare_button and selected_interventions:
             with st.spinner("Comparing interventions..."):
-                simulator = MonteCarloSimulator(builder)
+                simulator = MonteCarloSimulator(builder, show_progress=False)
                 
                 intervention_dicts = [interventions[name] for name in selected_interventions]
                 
@@ -434,6 +557,7 @@ def render_intervention_tab(scenario, builder):
                 color="Risk Reduction (%)",
                 color_continuous_scale="RdYlGn"
             )
+            fig = _apply_plotly_readability(fig, _get_ui_scale())
             st.plotly_chart(fig, width='stretch')
             
             # Detailed results
@@ -444,6 +568,11 @@ def render_intervention_tab(scenario, builder):
                     st.metric("Risk Reduction", f"{reduction_pct:.1f}%")
                     st.write("**Changes:**")
                     st.json(intervention)
+                    for node_id, state in intervention.items():
+                        description = _format_node_description(builder, node_id)
+                        st.write(f"- **{_format_node_label(builder, node_id)}** → `{state}`")
+                        if description:
+                            st.markdown(f"_Wyjaśnienie: {description}_")
             
             # Recommendation
             best_name, best_reduction, best_intervention = results[0]
@@ -455,9 +584,14 @@ def render_intervention_tab(scenario, builder):
                 Implementing **{best_name.split(': ')[1]}** provides the greatest risk reduction 
                 ({best_reduction:.1f}%). This should be your top priority.
                 """)
+                for node_id, state in best_intervention.items():
+                    description = _format_node_description(builder, node_id)
+                    st.write(f"- **{_format_node_label(builder, node_id)}** → `{state}`")
+                    if description:
+                        st.markdown(f"_Wyjaśnienie: {description}_")
 
 
-def visualize_network(builder) -> go.Figure:
+def visualize_network(builder, ui_scale: float = 1.0) -> go.Figure:
     """Create interactive network visualization using plotly."""
     
     # Build NetworkX graph
@@ -474,14 +608,58 @@ def visualize_network(builder) -> go.Figure:
     
     # Add edges
     G.add_edges_from(builder.edges)
-    
-    # Layout: hierarchical by level
-    pos = nx.spring_layout(G, k=2, iterations=50)
-    
-    # Adjust y-position by level for better hierarchy
-    for node in G.nodes():
-        level = G.nodes[node]['level']
-        pos[node] = (pos[node][0], level * 3)
+
+    def _wrap_label(label: str, max_line_len: int = 18, max_lines: int = 2) -> str:
+        label = (label or "").strip()
+        if not label:
+            return ""
+        words = label.split()
+        lines: list[str] = []
+        current: list[str] = []
+        for word in words:
+            candidate = " ".join(current + [word])
+            if len(candidate) <= max_line_len:
+                current.append(word)
+                continue
+            if current:
+                lines.append(" ".join(current))
+                current = [word]
+            else:
+                lines.append(word[:max_line_len])
+                current = []
+            if len(lines) >= max_lines:
+                break
+        if len(lines) < max_lines and current:
+            lines.append(" ".join(current))
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+        wrapped = "<br>".join(lines)
+        if len(lines) == max_lines and " ".join(words) != " ".join(lines).replace("<br>", " "):
+            wrapped = wrapped + "…"
+        return wrapped
+
+    # Deterministic hierarchical layout: per-level grid with generous spacing.
+    levels = [3, 2, 1]
+    level_nodes_map = {
+        level: sorted(
+            [n for n in G.nodes() if G.nodes[n]["level"] == level],
+            key=lambda n: str(G.nodes[n]["label"]),
+        )
+        for level in levels
+    }
+
+    x_gap = max(1.8, 1.4 * ui_scale)
+    y_gap = max(2.8, 2.4 * ui_scale)
+    pos: dict[str, tuple[float, float]] = {}
+    for idx, level in enumerate(levels):
+        nodes = level_nodes_map[level]
+        count = len(nodes)
+        if count == 0:
+            continue
+        start_x = -((count - 1) / 2.0) * x_gap
+        y = (len(levels) - idx) * y_gap
+        for i, node in enumerate(nodes):
+            pos[node] = (start_x + i * x_gap, y)
     
     # Create edge traces
     edge_trace = go.Scatter(
@@ -508,20 +686,26 @@ def visualize_network(builder) -> go.Figure:
     for level in [3, 2, 1]:
         level_nodes = [n for n in G.nodes() if G.nodes[n]['level'] == level]
         
+        marker_size = int(round(18 * ui_scale))
+        text_size = int(round(12 * ui_scale))
         node_trace = go.Scatter(
             x=[pos[n][0] for n in level_nodes],
             y=[pos[n][1] for n in level_nodes],
             mode='markers+text',
             name=level_names[level],
-            text=[G.nodes[n]['label'] for n in level_nodes],
+            text=[_wrap_label(str(G.nodes[n]['label']), max_line_len=18, max_lines=2) for n in level_nodes],
             textposition='top center',
+            textfont=dict(size=text_size),
             marker=dict(
-                size=20,
+                size=marker_size,
                 color=level_colors[level],
                 line=dict(width=2, color='white')
             ),
             hoverinfo='text',
-            hovertext=[f"{G.nodes[n]['label']}<br>Level: {level_names[level]}" for n in level_nodes]
+            hovertext=[
+                f"{G.nodes[n]['label']}<br>Node ID: {n}<br>Level: {level_names[level]}"
+                for n in level_nodes
+            ]
         )
         node_traces.append(node_trace)
     

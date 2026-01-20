@@ -41,7 +41,7 @@ class SimulationResult:
 class MonteCarloSimulator:
     """Runs Monte Carlo simulations on Bayesian cascade networks."""
     
-    def __init__(self, builder: CascadeNetworkBuilder):
+    def __init__(self, builder: CascadeNetworkBuilder, show_progress: bool = True):
         """
         Initialize simulator with a network builder.
         
@@ -51,6 +51,7 @@ class MonteCarloSimulator:
         self.builder = builder
         self.network = builder.network
         self.sampler = BayesianModelSampling(self.network)
+        self.show_progress = show_progress
     
     def run_simulation(
         self,
@@ -58,7 +59,9 @@ class MonteCarloSimulator:
         target_node: str,
         target_state: str,
         evidence: Optional[Dict[str, str]] = None,
-        track_paths: bool = True
+        track_paths: bool = True,
+        show_progress: Optional[bool] = None,
+        compute_base_probability: bool = True,
     ) -> SimulationResult:
         """
         Run Monte Carlo simulation to estimate risk and analyze paths.
@@ -75,23 +78,23 @@ class MonteCarloSimulator:
         """
         # Generate samples
         import pandas as pd
+        progress = self.show_progress if show_progress is None else show_progress
+
         if evidence:
-            # Convert evidence dict to list of tuples for pgmpy
             evidence_list = [(node, state) for node, state in evidence.items()]
             samples = self.sampler.rejection_sample(
                 evidence=evidence_list,
-                size=num_samples
+                size=num_samples,
+                show_progress=progress,
             )
-            # Convert to DataFrame if not already
-            if not isinstance(samples, pd.DataFrame):
-                samples = pd.DataFrame(samples)
         else:
             samples = self.sampler.forward_sample(
-                size=num_samples
+                size=num_samples,
+                show_progress=progress,
             )
-            # Convert to DataFrame if not already
-            if not isinstance(samples, pd.DataFrame):
-                samples = pd.DataFrame(samples)
+
+        if not isinstance(samples, pd.DataFrame):
+            samples = pd.DataFrame(samples)
         
         # Calculate target state frequency
         target_occurrences = (samples[target_node] == target_state).sum()
@@ -110,11 +113,11 @@ class MonteCarloSimulator:
                 samples, target_node, target_state
             )
         
-        # Compute baseline probability using inference
-        inference = CascadeInferenceEngine(self.network)
-        base_prob = inference.compute_risk_score(
-            evidence or {}, target_node, target_state
-        )
+        if compute_base_probability:
+            inference = CascadeInferenceEngine(self.network)
+            base_prob = inference.compute_risk_score(evidence or {}, target_node, target_state)
+        else:
+            base_prob = float("nan")
         
         return SimulationResult(
             num_simulations=num_samples,
@@ -133,7 +136,8 @@ class MonteCarloSimulator:
         target_node: str,
         target_state: str,
         base_evidence: Dict[str, str],
-        vary_nodes: List[str]
+        vary_nodes: List[str],
+        show_progress: Optional[bool] = None,
     ) -> Dict[str, Dict[str, float]]:
         """
         Monte Carlo-based sensitivity analysis: vary each node and measure impact.
@@ -148,9 +152,14 @@ class MonteCarloSimulator:
         Returns:
             Dict mapping node → state → impact on target probability
         """
-        # Baseline probability
         baseline_result = self.run_simulation(
-            num_samples, target_node, target_state, base_evidence, track_paths=False
+            num_samples,
+            target_node,
+            target_state,
+            base_evidence,
+            track_paths=False,
+            show_progress=show_progress,
+            compute_base_probability=False,
         )
         baseline_prob = baseline_result.simulated_probability
         
@@ -167,12 +176,18 @@ class MonteCarloSimulator:
                 
                 # Run simulation
                 result = self.run_simulation(
-                    num_samples, target_node, target_state, 
-                    modified_evidence, track_paths=False
+                    num_samples,
+                    target_node,
+                    target_state,
+                    modified_evidence,
+                    track_paths=False,
+                    show_progress=show_progress,
+                    compute_base_probability=False,
                 )
+                prob = result.simulated_probability
                 
                 # Compute impact
-                impact = result.simulated_probability - baseline_prob
+                impact = prob - baseline_prob
                 state_impacts[state] = impact
             
             sensitivity[node] = state_impacts
@@ -185,7 +200,8 @@ class MonteCarloSimulator:
         target_node: str,
         target_state: str,
         base_evidence: Dict[str, str],
-        interventions: List[Dict[str, str]]
+        interventions: List[Dict[str, str]],
+        show_progress: Optional[bool] = None,
     ) -> List[Tuple[str, float, Dict[str, str]]]:
         """
         Compare effectiveness of different interventions.
@@ -200,9 +216,14 @@ class MonteCarloSimulator:
         Returns:
             List of (intervention_name, risk_reduction, intervention_dict) sorted by effectiveness
         """
-        # Baseline risk
         baseline_result = self.run_simulation(
-            num_samples, target_node, target_state, base_evidence, track_paths=False
+            num_samples,
+            target_node,
+            target_state,
+            base_evidence,
+            track_paths=False,
+            show_progress=show_progress,
+            compute_base_probability=False,
         )
         baseline_risk = baseline_result.simulated_probability
         
@@ -215,12 +236,18 @@ class MonteCarloSimulator:
             
             # Simulate
             result = self.run_simulation(
-                num_samples, target_node, target_state,
-                modified_evidence, track_paths=False
+                num_samples,
+                target_node,
+                target_state,
+                modified_evidence,
+                track_paths=False,
+                show_progress=show_progress,
+                compute_base_probability=False,
             )
+            risk = result.simulated_probability
             
             # Calculate risk reduction
-            risk_reduction = baseline_risk - result.simulated_probability
+            risk_reduction = baseline_risk - risk
             risk_reduction_pct = (risk_reduction / baseline_risk * 100) if baseline_risk > 0 else 0
             
             intervention_name = f"Intervention {i+1}: " + ", ".join(

@@ -236,3 +236,10 @@ def list_nodes_by_level(level: NodeLevel) -> List[NodeDefinition]:
 def list_nodes_by_category(category: NodeCategory) -> List[NodeDefinition]:
     """Get all nodes in a specific category."""
     return [n for n in NODE_REGISTRY.values() if n.category == category]
+
+
+def register_nodes(nodes: List[NodeDefinition]) -> None:
+    for node in nodes:
+        if node.id in NODE_REGISTRY:
+            continue
+        NODE_REGISTRY[node.id] = node
